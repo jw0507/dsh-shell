@@ -1,0 +1,18 @@
+{
+  "shellPort": 3081,
+  "dshPort": 3080,
+  "dshProxyPort": 3089,
+  "dshPackage": "@deepseek-ai/dsh",
+  "installRoot": "%LOCALAPPDATA%\\dsh-cli",
+  "nodeMinMajor": 20,
+  "autoOpenBrowser": true,
+  "autoCheckUpdate": true,
+  "autoOpenDshWindow": true,
+  "windowMode": "webview2",
+  "mirrors": [
+    "https://registry.npmmirror.com",
+    "https://mirrors.cloud.tencent.com/npm/",
+    "https://repo.huaweicloud.com/repository/npm/",
+    "https://registry.npmjs.org"
+  ]
+}

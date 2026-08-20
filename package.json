@@ -1,0 +1,18 @@
+{
+  "name": "dsh-shell",
+  "version": "1.0.0",
+  "description": "DeepSeek Harness (dsh) 纯壳启动器：隐藏后台运行、关窗不停服务、原生更新 + 国内镜像兜底、全新设备一键安装",
+  "type": "module",
+  "main": "dsh-shell.mjs",
+  "bin": {
+    "dsh-shell": "dsh-shell.mjs"
+  },
+  "scripts": {
+    "start": "node dsh-shell.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "keywords": ["dsh", "deepseek-harness", "launcher", "shell"],
+  "license": "MIT"
+}

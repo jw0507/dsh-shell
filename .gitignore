@@ -1,0 +1,4 @@
+# 运行数据（日志 / PID / 浏览器独立窗口 profile）
+data/
+*.log
+*.bak
