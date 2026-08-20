@@ -11,7 +11,7 @@
 import http from 'node:http';
 import { spawn, execFile } from 'node:child_process';
 import {
-  existsSync, mkdirSync, readFileSync, writeFileSync, appendFileSync, openSync,
+  existsSync, mkdirSync, readFileSync, writeFileSync, appendFileSync,
   statSync, renameSync, unlinkSync, copyFileSync, rmSync
 } from 'node:fs';
 import { fileURLToPath } from 'node:url';
@@ -189,6 +189,7 @@ function statusJson() {
     version: SHELL_VERSION,
     dshPort: cfg.dshPort, installRoot: cfg.installRoot,
     windowMode: cfg.windowMode, appBrowser: !!findAppBrowser(),
+    shellPort: cfg.shellPort,
     nodeOk: nodeVersionOk()
   };
 }
@@ -196,6 +197,11 @@ function statusJson() {
 // ---------------------------------------------------------------- 工具 ----
 function runCmd(file, args, { timeoutMs = 30000 } = {}) {
   return new Promise(resolve => {
+    // Windows 上 npm 是 npm.cmd，execFile 无法直接执行 .cmd（ENOENT）——统一走 cmd /c npm ...
+    if (String(file).toLowerCase() === 'npm') {
+      file = process.env.ComSpec || 'cmd.exe';
+      args = ['/c', 'npm', ...args];
+    }
     execFile(file, args, {
       windowsHide: true, timeout: timeoutMs, killSignal: 'SIGKILL', maxBuffer: 32 * 1024 * 1024
     }, (err, stdout, stderr) => {
@@ -532,34 +538,50 @@ async function checkUpdate(quick = false) {
 
 async function updateDsh() {
   if (state.busy || state.checking) return { ok: false, msg: '已有任务进行中' };
-  let wasRunning = state.running;
-  if (state.running && !state.owned) {
-    // 外部实例在跑：仅安装到安装根，不停止/不重启现有实例
-    pushLog('info', '检测到外部 dsh 实例：跳过停止/重启，仅安装到安装根');
-    wasRunning = false;
+  // 直接用已知版本信息判断（壳启动时已读取最新版；前提是两者读取正确）：
+  //   一致 → 已是最新，无需更新；否则（未安装 / 有新版 / 最新版未知）→ 直接安装/更新
+  if (state.localVersion && state.latestVersion && state.localVersion === state.latestVersion) {
+    pushLog('info', '已是最新版本 ' + state.latestVersion + '，无需更新');
+    return { ok: false, msg: '已是最新版本 ' + state.latestVersion + '，无需更新' };
   }
+  // 立即进入 busy 并给反馈（安装过程可能耗时较长）
   state.busy = true;
   broadcast('status', statusJson());
+  pushLog('info', state.localVersion
+    ? ('开始更新：当前 ' + state.localVersion + '，最新 ' + (state.latestVersion || '未知') + '...')
+    : '开始安装 dsh（本机未安装）...');
   try {
+    // 前置检查（先于停服务）：Node 版本 + npm 可用——检查失败时 dsh 保持运行，不会丢服务
+    if (!nodeVersionOk()) { pushLog('error', 'Node 版本过低，无法安装。'); return { ok: false, msg: 'Node 版本过低，无法安装' }; }
+    const npmv = await runCmd('npm', ['--version'], { timeoutMs: 8000 });
+    if (!npmv.ok) { pushLog('error', '未找到 npm（npm 随 Node.js 自带，请确认安装）。'); return { ok: false, msg: '未找到 npm' }; }
+    let wasRunning = state.running;
+    if (state.running && !state.owned) {
+      // 外部实例在跑：仅安装到安装根，不停止/不重启现有实例
+      pushLog('info', '检测到外部 dsh 实例：跳过停止/重启，仅安装到安装根');
+      wasRunning = false;
+    }
     if (wasRunning) {
       pushLog('info', '先停止当前 dsh 服务...');
       const s = await stopDsh();
       if (!s.ok) return s;
     }
-    if (!nodeVersionOk()) { pushLog('error', 'Node 版本过低，无法安装。'); return { ok: false, msg: 'Node 版本过低，无法安装' }; }
-    const npmv = await runCmd('npm', ['--version'], { timeoutMs: 8000 });
-    if (!npmv.ok) { pushLog('error', '未找到 npm（npm 随 Node.js 自带，请确认安装）。'); return { ok: false, msg: '未找到 npm' }; }
     let ok = false, lastErr = '';
     for (const m of cfg.mirrors) {
       pushLog('info', '安装 ' + cfg.dshPackage + '@latest（源: ' + m + '，预计 1 分钟内）...');
       const r = await runCmd('npm', [
         'install', cfg.dshPackage + '@latest', '--prefix', cfg.installRoot, '--registry=' + m
-      ], { timeoutMs: 300000 });
+      ], { timeoutMs: 120000 });
       if (r.ok) { ok = true; pushLog('info', '安装成功（源: ' + m + '）'); break; }
       lastErr = r.timedOut ? '安装超时(5分钟)' : (r.err.trim().split(/\r?\n/).slice(-2).join(' ') || '安装失败');
       pushLog('warn', '该源安装失败，切换下一个... ' + lastErr);
     }
-    if (!ok) { pushLog('error', '所有镜像都失败，更新中止。最后原因: ' + lastErr); return { ok: false, msg: '更新失败: ' + lastErr }; }
+    if (!ok) {
+      pushLog('error', '所有镜像都失败，更新中止。最后原因: ' + lastErr);
+      // 关键防护：更新失败时若原本有壳管理的服务，尝试恢复（避免"停掉后没重启"丢服务）
+      if (wasRunning) { pushLog('info', '更新失败，尝试恢复原 dsh 服务...'); await startDsh(); }
+      return { ok: false, msg: '更新失败: ' + lastErr };
+    }
     state.localVersion = localVersion();
     pushLog('info', '更新完成，当前版本: ' + (state.localVersion ?? '未知'));
     if (wasRunning) {
@@ -650,7 +672,7 @@ a { color:var(--acc); }
     <h1>DeepSeek Harness Shell</h1>
     <span class="ver" id="shellVer">v1.0.0</span>
   </div>
-  <div class="tagline">关闭任何窗口都不会停止 dsh 服务 · 原生更新 + 国内镜像兜底</div>
+  <div class="tagline">关闭任何窗口都不会停止 dsh 服务 · 原生更新 + 国内镜像兜底 · 面板端口 <span id="portInfo" style="color:var(--acc)">—</span></div>
 
   <div class="card">
     <div class="row">
@@ -659,7 +681,7 @@ a { color:var(--acc); }
     </div>
     <div class="kv" id="kv"></div>
     <div class="sub" id="updHint" style="margin-top:10px;color:var(--ok);display:none"></div>
-    <div class="sub" id="extHint" style="margin-top:10px;color:var(--warn);display:none">检测到外部 dsh 实例（非本壳启动），已锁定 停止/更新</div>
+    <div class="sub" id="extHint" style="margin-top:10px;color:var(--warn);display:none">检测到外部 dsh 实例（非本壳启动）：停止/重启已锁定；「一键安装 / 更新」仅安装到安装根，运行中的实例需自行重启后生效</div>
     <div class="sub" id="nodeWarn" style="margin-top:10px;color:var(--err);display:none">⚠️ Node 版本过低（需要 &gt;= 20）</div>
     <div class="sub" style="margin-top:10px;color:var(--dim);font-size:12px">关闭本窗口后约 120 秒壳自动退出（dsh 服务不受影响）</div>
     <div class="sub" style="margin-top:8px;color:var(--dim);font-size:11px">dsh-shell <span id="shellVer2"></span> · <a href="#" id="reCheck">重新检查更新</a> · <a href="#" id="openBr">在浏览器中打开</a></div>
@@ -696,8 +718,9 @@ function renderKv(s){
 }
 function render(s){
   var dot = $('dot');
-  dot.className = 'status-dot' + (s.starting ? ' dot-start' : s.running ? ' dot-run' : ' dot-stop');
-  $('statusText').textContent = s.starting ? '启动中…' : s.stopping ? '停止中…' : s.checking ? '检查更新中…' : (s.running ? (s.owned ? '运行中（本壳管理）' : '运行中（外部进程，已锁定）') : '未运行');
+  dot.className = 'status-dot' + (s.starting ? ' dot-start' : s.running ? ' dot-run' : '');
+  $('statusText').textContent = s.starting ? '启动中…' : s.stopping ? '停止中…' : s.checking ? '检查更新中…' : s.busy ? '安装 / 更新中…' : (s.running ? (s.owned ? '运行中（本壳管理）' : '运行中（外部进程，已锁定）') : '未运行');
+  if (s.shellPort && $('portInfo')) $('portInfo').textContent = s.shellPort;
   $('nodeWarn').style.display = s.nodeOk ? 'none' : 'block';
   $('extHint').style.display = (s.running && !s.owned) ? 'block' : 'none';
   // 版本提示：有新版本且（未安装或与本地不一致）→ 提示可更新
@@ -713,7 +736,8 @@ function render(s){
   $('btnStart').disabled = s.running || s.starting || s.stopping || s.busy;
   $('btnStop').disabled  = !(s.running && s.owned) || s.stopping || s.busy;
   $('btnRestart').disabled = s.starting || s.stopping || s.busy || (s.running && !s.owned);
-  $('btnUpdate').disabled = s.busy || (s.running && !s.owned) || s.stopping;
+  // 外部实例也可更新：updateDsh 走"仅安装到安装根，不重启"分支（extHint 有提示）
+  $('btnUpdate').disabled = s.busy || s.stopping;
 }
 function showMsg(t, kind){ var m = $('msg'); m.textContent = t; m.className = 'msg show ' + (kind||'ok'); }
 function appendLogLine(e){
@@ -726,6 +750,7 @@ function appendLogLine(e){
   while (el.children.length > 2000) el.removeChild(el.firstChild);
   el.scrollTop = el.scrollHeight;
 }
+var lastStatus = null;
 var wasChecking = false;
 es.addEventListener('status', function(e){
   var s = JSON.parse(e.data);
@@ -742,6 +767,7 @@ es.addEventListener('status', function(e){
     }
   }
   wasChecking = s.checking;
+  lastStatus = s;
   render(s);
 });
 es.addEventListener('log', function(e){
@@ -759,6 +785,15 @@ $('btnStart').onclick = function(){ act('/api/start', '启动'); };
 $('btnStop').onclick = function(){ act('/api/stop', '停止'); };
 $('btnRestart').onclick = function(){ act('/api/restart', '重启'); };
 $('btnUpdate').onclick = function(){
+  var s = lastStatus || {};
+  var tip = '';
+  if (s.running && s.owned) tip = '将先停止 dsh 服务，安装完成后自动重启。';
+  else if (s.running && !s.owned) tip = '当前为外部 dsh 实例：仅安装到安装根，运行中的实例需自行重启后生效。';
+  else tip = 'dsh 未运行，将安装最新版本。';
+  var v = '';
+  if (s.localVersion) v += '当前 ' + s.localVersion + '，';
+  if (s.latestVersion) v += '最新 ' + s.latestVersion + '，';
+  if (!confirm((v ? v + '确定' : '确定') + '要安装 / 更新 dsh 吗？\\n' + tip + '\\n安装可能需要几分钟。')) return;
   showMsg('开始安装 / 更新（进度请看日志）…', 'ok');
   fetch('/api/update', {method:'POST'}).then(function(r){ return r.json(); }).then(function(j){
     if (!j.ok && j.msg) showMsg(j.msg, 'bad');
@@ -775,7 +810,9 @@ $('reCheck').onclick = function(e){
 $('openBr').onclick = function(e){ e.preventDefault(); fetch('/api/open-browser', {method:'POST'}); };
 
 $('btnClearLog').onclick = function(){ $('log').innerHTML = ''; };
-fetch('/api/status').then(function(r){ return r.json(); }).then(render);
+fetch('/api/status').then(function(r){ return r.json(); }).then(render).catch(function(){
+  $('statusText').textContent = '无法连接壳服务（端口可能已变化）：请关闭本窗口，重新双击 start.cmd 打开新面板';
+});
 </script>
 </body>
 </html>`;
@@ -790,7 +827,7 @@ function sendJson(res, obj, code) {
   res.end(b);
 }
 function sendText(res, text, type) {
-  res.writeHead(200, { 'Content-Type': type || 'text/plain; charset=utf-8' });
+  res.writeHead(200, { 'Content-Type': type || 'text/plain; charset=utf-8', 'Cache-Control': 'no-store' });
   res.end(text);
 }
 
