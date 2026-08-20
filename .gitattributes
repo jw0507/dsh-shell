@@ -1,2 +1,4 @@
 # Auto detect text files and perform LF normalization
 * text=auto
+# cmd 批处理必须 CRLF（cmd.exe 对 LF 行尾有兼容性问题）
+*.cmd text eol=crlf
