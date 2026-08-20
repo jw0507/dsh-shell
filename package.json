@@ -13,6 +13,6 @@
   "engines": {
     "node": ">=20"
   },
-  "keywords": ["dsh", "deepseek-harness", "launcher", "shell"],
+  "keywords": ["dsh", "deepseek-harness", "dsh-plugin", "launcher", "shell", "windows", "webview2"],
   "license": "MIT"
 }

@@ -147,6 +147,12 @@ A：壳会自动轮换镜像重试；全部失败会保留旧版本并给出日�
 - 因此**不做**托盘图标、开机自启、常驻后台等"管理器"功能；
 - 独立窗口基于 WebView2（复用系统 Edge 引擎，零第三方运行时）；图标/任务栏身份由原生宿主 exe 控制，无需 Electron。
 
+## DSH 生态
+
+- **定位**：dsh-shell 是 DeepSeek Harness 的**独立启动器/客户端**（非 dsh 进程内插件）——它从外部管理 dsh 的启动/停止/更新，并提供 WebView2 原生显示器，不修改 dsh 本身。
+- **发现方式**：GitHub 仓库打了 `dsh-plugin` topic（dsh 生态官方指定的发现标签，见 [awesome-dsh-plugin](https://github.com/Anil-matcha/awesome-dsh-plugin)），同时可在 GitHub 按 `dsh` / `deepseek-harness` / `launcher` 等 topic 搜索到。
+- **使用**：克隆或下载后双击 `start.cmd` 即可，无需编译、无需安装到 dsh profile。
+
 ## License
 
 MIT
