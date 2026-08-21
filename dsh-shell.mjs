@@ -810,6 +810,8 @@ $('reCheck').onclick = function(e){
 $('openBr').onclick = function(e){ e.preventDefault(); fetch('/api/open-browser', {method:'POST'}); };
 
 $('btnClearLog').onclick = function(){ $('log').innerHTML = ''; };
+// 页面卸载（关闭/刷新）时主动通知壳，确保自动退出计时可靠触发（不依赖 TCP close）
+window.addEventListener('beforeunload', function(){ try { navigator.sendBeacon('/api/panel-closed'); } catch(e){} });
 fetch('/api/status').then(function(r){ return r.json(); }).then(render).catch(function(){
   $('statusText').textContent = '无法连接壳服务（端口可能已变化）：请关闭本窗口，重新双击 start.cmd 打开新面板';
 });
@@ -868,6 +870,17 @@ async function handle(req, res) {
       if (state.busy || state.checking) return sendJson(res, { ok: false, msg: '已有任务进行中' });
       updateDsh(); // 非阻塞
       return sendJson(res, { ok: true, started: true });
+    }
+    if (req.method === 'POST' && p === '/api/panel-closed') {
+      // 面板页面卸载通知：强制启动退出计时（即使 SSE 连接尚未断开；新面板打开时会自动清除）
+      if (!noClientTimer) {
+        noClientTimer = setTimeout(() => {
+          shellLog('面板已关闭超过 120 秒，壳自动退出（dsh 服务不受影响）');
+          clearShellPid();
+          process.exit(0);
+        }, 120000);
+      }
+      return sendJson(res, { ok: true });
     }
     if (req.method === 'POST' && p === '/api/open-ui') { openDshUi(); return sendJson(res, { ok: true }); }
     if (req.method === 'POST' && p === '/api/open-window') { openPanel(); return sendJson(res, { ok: true }); }
