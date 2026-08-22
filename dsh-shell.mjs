@@ -229,6 +229,17 @@ function runCmd(file, args, { timeoutMs = 30000, cwd = undefined } = {}) {
   });
 }
 
+// 提取命令失败的可读原因。关键：pnpm 把错误打到 stdout（而非 stderr），npm 打到 stderr，
+// 所以必须合并两者取——否则 pnpm 失败时 stderr 为空，会误报成无意义的「安装失败」。
+function cmdError(r, timeoutLabel = '命令超时') {
+  if (r.timedOut) return timeoutLabel;
+  const text = ((r.out || '') + '\n' + (r.err || '')).trim();
+  if (!text) return '未知错误（无输出）';
+  const lines = text.split(/\r?\n/).map(s => s.trim()).filter(Boolean);
+  // 优先取 ERR_* 行（pnpm 的 [ERR_PNPM_...]），否则取最后一行
+  return lines.find(l => l.includes('ERR_')) || lines[lines.length - 1];
+}
+
 function checkPort(port, host = '127.0.0.1') {
   return new Promise(res => {
     const s = net.connect({ port, host });
@@ -588,7 +599,10 @@ async function updateDsh() {
         'add', cfg.dshPackage + '@latest', '--registry=' + m
       ], { timeoutMs: 180000, cwd: DSH_PROFILE_DIR });
       if (r.ok) { ok = true; pushLog('info', '安装成功（源: ' + m + '）'); break; }
-      lastErr = r.timedOut ? '安装超时(3分钟)' : (r.err.trim().split(/\r?\n/).slice(-2).join(' ') || '安装失败');
+      lastErr = cmdError(r, '安装超时(3分钟)');
+      if (lastErr.includes('ERR_PNPM_IGNORED_BUILDS')) {
+        lastErr += '（pnpm 拦截了构建脚本：请在 ' + DSH_PROFILE_DIR + ' 运行 pnpm approve-builds，或把相关包加入 pnpm-workspace.yaml 的 allowBuilds）';
+      }
       pushLog('warn', '该源安装失败，切换下一个... ' + lastErr);
     }
     if (!ok) {
