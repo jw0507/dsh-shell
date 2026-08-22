@@ -2,10 +2,10 @@
 // ============================================================================
 // dsh-shell.mjs —— DeepSeek Harness 纯壳启动器（零依赖，Node >= 20）
 // 设计原则（纯壳）：
-//   * 不改 dsh 内部任何东西；只做：启停、状态、更新（走官方 npm）、日志
+//   * 不改 dsh 内部任何东西；只做：启停、状态、更新、日志
 //   * UI 只在浏览器/独立窗口显示，壳本体是零依赖 Node 单文件
-//   * 更新 = 官方 npm install @deepseek-ai/dsh@latest，多镜像轮换兜底
-//   * 全新设备：未安装 dsh 时，面板「一键安装 / 更新」自动装到 installRoot
+//   * 更新 = 在 profile 目录（~/.dsh/profiles/<profile>）用 pnpm add @latest，多镜像轮换兜底
+//   * 全新设备：未安装 dsh 时，面板「一键安装 / 更新」自动装到 profile 目录
 //   * 外部 dsh 进程（非本壳启动）默认锁定，避免误杀正在运行的服务
 // ============================================================================
 import http from 'node:http';
@@ -27,7 +27,8 @@ const DEFAULTS = {
   dshPort: 3080,
   dshProxyPort: 3089,   // 已废弃（反代被 dsh 安全层拒绝），仅保留兼容
   dshPackage: '@deepseek-ai/dsh',
-  installRoot: '%LOCALAPPDATA%\dsh-cli',
+  profile: 'web',   // dsh 是 profile 型应用；真实安装位置 = ~/.dsh/profiles/<profile>
+  dshHome: '',      // 空 = 自动（$DSH_HOME 或 ~/.dsh），与 dsh 自身解析一致
   nodeMinMajor: 20,
   autoOpenBrowser: true,
   autoCheckUpdate: true,    // 启动后后台快速检查一次最新版本（有新版才提示）
@@ -41,22 +42,35 @@ const DEFAULTS = {
   ]
 };
 
-function expandEnv(s) {
-  return String(s).replace(/%([^%]+)%/g, (_, k) => process.env[k] ?? ('%' + k + '%'));
-}
-
 function loadConfig() {
   const cfgPath = path.join(__dirname, 'config.json');
   let user = {};
   if (existsSync(cfgPath)) {
     try { user = JSON.parse(readFileSync(cfgPath, 'utf8')); } catch { /* 配置损坏时用默认 */ }
   }
-  const cfg = { ...DEFAULTS, ...user };
-  cfg.installRoot = expandEnv(cfg.installRoot);
-  return cfg;
+  return { ...DEFAULTS, ...user };
 }
 
 const cfg = loadConfig();
+
+// ---- dsh 真实安装位置 ----
+// dsh 是 profile 型应用（cordis/koishi 架构）：安装物 = ~/.dsh/profiles/<profile>/ 的
+// package.json（声明 @deepseek-ai/dsh 版本 + bundles）+ pnpm 装的 node_modules；
+// 启动器 @deepseek-ai/dsh 只是该 profile 的一个依赖，不是"全局 CLI"。
+function expandTilde(p) {
+  if (p === '~') return os.homedir();
+  if (p.startsWith('~/') || p.startsWith('~\\')) return path.join(os.homedir(), p.slice(2));
+  return p;
+}
+function resolveDshHome() {
+  const env = process.env.DSH_HOME;
+  const c = String(cfg.dshHome || '').trim();
+  if (c) return expandTilde(c);
+  if (env && env.trim()) return env.trim();
+  return path.join(os.homedir(), '.dsh');
+}
+const DSH_HOME = resolveDshHome();
+const DSH_PROFILE_DIR = path.join(DSH_HOME, 'profiles', String(cfg.profile || 'web'));
 const SHELL_VERSION = '1.0.0'; // 壳版本号（界面/日志显示，便于更新对齐）
 // dsh 启动目录：仅作中性默认（工作区由 dsh 自身持久化管理，在 DSH UI 中切换，不向用户暴露）
 const START_CWD = os.homedir();
@@ -142,18 +156,15 @@ function broadcast(event, payload) {
   for (const c of sseClients) { try { c.write(frame); } catch {} }
 }
 
-// dsh CLI 候选位置（按优先级）：
-//   1) 稳定安装根（壳管理，默认 %LOCALAPPDATA%\dsh-cli）
-//   2) 旧式 profiles 安装（与旧启动器一致，位于 DSH_HOME）
-//   3) profiles/web 安装（旧 update 脚本目标）
-//   4) npx hoisted 检出目录兜底（最后才认）
+// dsh 启动器候选位置（按优先级）：
+//   1) profile 目录（真实安装位置：~/.dsh/profiles/<profile>/node_modules）
+//   2) 旧式 profiles 根安装（符号链接到 dsh-hoisted 临时目录，版本可能陈旧）
+//   3) npx/pnpm hoisted 临时目录兜底
 function candidateCliPaths() {
-  const home = process.env.USERPROFILE || '';
   const tmp = process.env.TEMP || '';
   return [
-    path.join(cfg.installRoot, 'node_modules', cfg.dshPackage, 'lib', 'bin.js'),
-    path.join(home, '.dsh', 'profiles', 'node_modules', cfg.dshPackage, 'lib', 'bin.js'),
-    path.join(home, '.dsh', 'profiles', 'web', 'node_modules', cfg.dshPackage, 'lib', 'bin.js'),
+    path.join(DSH_PROFILE_DIR, 'node_modules', cfg.dshPackage, 'lib', 'bin.js'),
+    path.join(DSH_HOME, 'profiles', 'node_modules', cfg.dshPackage, 'lib', 'bin.js'),
     path.join(tmp, 'dsh-hoisted', 'node_modules', cfg.dshPackage, 'lib', 'bin.js')
   ];
 }
@@ -187,7 +198,7 @@ function statusJson() {
     pid: state.pid, localVersion: state.localVersion, latestVersion: state.latestVersion,
     lastCheckAt: state.lastCheckAt, installed: cliInstalled(), cliPath: findDshCli(),
     version: SHELL_VERSION,
-    dshPort: cfg.dshPort, installRoot: cfg.installRoot,
+    dshPort: cfg.dshPort, profileDir: DSH_PROFILE_DIR,
     windowMode: cfg.windowMode, appBrowser: !!findAppBrowser(),
     shellPort: cfg.shellPort,
     nodeOk: nodeVersionOk()
@@ -195,14 +206,16 @@ function statusJson() {
 }
 
 // ---------------------------------------------------------------- 工具 ----
-function runCmd(file, args, { timeoutMs = 30000 } = {}) {
+function runCmd(file, args, { timeoutMs = 30000, cwd = undefined } = {}) {
   return new Promise(resolve => {
-    // Windows 上 npm 是 npm.cmd，execFile 无法直接执行 .cmd（ENOENT）——统一走 cmd /c npm ...
-    if (String(file).toLowerCase() === 'npm') {
+    // Windows 上 npm/pnpm 是 .cmd，execFile 无法直接执行 .cmd（ENOENT）——统一走 cmd /c
+    const low = String(file).toLowerCase();
+    if (low === 'npm' || low === 'pnpm') {
       file = process.env.ComSpec || 'cmd.exe';
-      args = ['/c', 'npm', ...args];
+      args = ['/c', low, ...args];
     }
     execFile(file, args, {
+      cwd,
       windowsHide: true, timeout: timeoutMs, killSignal: 'SIGKILL', maxBuffer: 32 * 1024 * 1024
     }, (err, stdout, stderr) => {
       resolve({
@@ -376,7 +389,7 @@ async function startDsh() {
   //   不能用 cmd /c 拼命令字符串——cmd 会把路径两侧的引号原样传给 node（MODULE_NOT_FOUND）
   //   stdio: 'ignore'：不向 dsh 传任何句柄 -> 根治"dsh 继承壳监听句柄"导致的幽灵端口
   //   （代价：dsh 自身 stdout/stderr 不再写入 dsh.log；解耦承诺不受影响）
-  child = spawn(process.execPath, [cli, 'web'], {
+  child = spawn(process.execPath, [cli, '--profile', cfg.profile], {
     cwd: START_CWD,
     env: process.env,
     windowsHide: true,
@@ -551,14 +564,14 @@ async function updateDsh() {
     ? ('开始更新：当前 ' + state.localVersion + '，最新 ' + (state.latestVersion || '未知') + '...')
     : '开始安装 dsh（本机未安装）...');
   try {
-    // 前置检查（先于停服务）：Node 版本 + npm 可用——检查失败时 dsh 保持运行，不会丢服务
+    // 前置检查（先于停服务）：Node 版本 + pnpm 可用——检查失败时 dsh 保持运行，不会丢服务
     if (!nodeVersionOk()) { pushLog('error', 'Node 版本过低，无法安装。'); return { ok: false, msg: 'Node 版本过低，无法安装' }; }
-    const npmv = await runCmd('npm', ['--version'], { timeoutMs: 8000 });
-    if (!npmv.ok) { pushLog('error', '未找到 npm（npm 随 Node.js 自带，请确认安装）。'); return { ok: false, msg: '未找到 npm' }; }
+    const pnpmv = await runCmd('pnpm', ['--version'], { timeoutMs: 8000 });
+    if (!pnpmv.ok) { pushLog('error', '未找到 pnpm（dsh 依赖 pnpm 管理 profile，请先安装 pnpm）。'); return { ok: false, msg: '未找到 pnpm' }; }
     let wasRunning = state.running;
     if (state.running && !state.owned) {
-      // 外部实例在跑：仅安装到安装根，不停止/不重启现有实例
-      pushLog('info', '检测到外部 dsh 实例：跳过停止/重启，仅安装到安装根');
+      // 外部实例在跑：仅更新到 profile 目录，不停止/不重启现有实例
+      pushLog('info', '检测到外部 dsh 实例：跳过停止/重启，仅更新到 profile 目录');
       wasRunning = false;
     }
     if (wasRunning) {
@@ -566,14 +579,16 @@ async function updateDsh() {
       const s = await stopDsh();
       if (!s.ok) return s;
     }
+    // 确保 profile 目录存在（全新设备首次安装）
+    try { mkdirSync(DSH_PROFILE_DIR, { recursive: true }); } catch {}
     let ok = false, lastErr = '';
     for (const m of cfg.mirrors) {
-      pushLog('info', '安装 ' + cfg.dshPackage + '@latest（源: ' + m + '，预计 1 分钟内）...');
-      const r = await runCmd('npm', [
-        'install', cfg.dshPackage + '@latest', '--prefix', cfg.installRoot, '--registry=' + m
-      ], { timeoutMs: 120000 });
+      pushLog('info', '在 ' + DSH_PROFILE_DIR + ' 更新 ' + cfg.dshPackage + '@latest（源: ' + m + '）...');
+      const r = await runCmd('pnpm', [
+        'add', cfg.dshPackage + '@latest', '--registry=' + m
+      ], { timeoutMs: 180000, cwd: DSH_PROFILE_DIR });
       if (r.ok) { ok = true; pushLog('info', '安装成功（源: ' + m + '）'); break; }
-      lastErr = r.timedOut ? '安装超时(5分钟)' : (r.err.trim().split(/\r?\n/).slice(-2).join(' ') || '安装失败');
+      lastErr = r.timedOut ? '安装超时(3分钟)' : (r.err.trim().split(/\r?\n/).slice(-2).join(' ') || '安装失败');
       pushLog('warn', '该源安装失败，切换下一个... ' + lastErr);
     }
     if (!ok) {
@@ -582,6 +597,7 @@ async function updateDsh() {
       if (wasRunning) { pushLog('info', '更新失败，尝试恢复原 dsh 服务...'); await startDsh(); }
       return { ok: false, msg: '更新失败: ' + lastErr };
     }
+    foundCli = null; // 强制重新扫描启动器位置（版本/路径可能已变）
     state.localVersion = localVersion();
     pushLog('info', '更新完成，当前版本: ' + (state.localVersion ?? '未知'));
     if (wasRunning) {
@@ -681,7 +697,7 @@ a { color:var(--acc); }
     </div>
     <div class="kv" id="kv"></div>
     <div class="sub" id="updHint" style="margin-top:10px;color:var(--ok);display:none"></div>
-    <div class="sub" id="extHint" style="margin-top:10px;color:var(--warn);display:none">检测到外部 dsh 实例（非本壳启动）：停止/重启已锁定；「一键安装 / 更新」仅安装到安装根，运行中的实例需自行重启后生效</div>
+    <div class="sub" id="extHint" style="margin-top:10px;color:var(--warn);display:none">检测到外部 dsh 实例（非本壳启动）：停止/重启已锁定；「一键安装 / 更新」仅更新到 profile 目录，运行中的实例需自行重启后生效</div>
     <div class="sub" id="nodeWarn" style="margin-top:10px;color:var(--err);display:none">⚠️ Node 版本过低（需要 &gt;= 20）</div>
     <div class="sub" style="margin-top:10px;color:var(--dim);font-size:12px">关闭本窗口后约 120 秒壳自动退出（dsh 服务不受影响）</div>
     <div class="sub" style="margin-top:8px;color:var(--dim);font-size:11px">dsh-shell <span id="shellVer2"></span> · <a href="#" id="reCheck">重新检查更新</a> · <a href="#" id="openBr">在浏览器中打开</a></div>
@@ -714,7 +730,7 @@ function renderKv(s){
   function add(k, v){ var b = document.createElement('b'); b.textContent = k; var sp = document.createElement('span'); sp.textContent = v; kv.appendChild(b); kv.appendChild(sp); }
   add('本机版本', s.localVersion || '未安装');
   add('最新版本', s.latestVersion || '—');
-  add('安装位置', s.installRoot);
+  add('安装位置', s.profileDir);
 }
 function render(s){
   var dot = $('dot');
@@ -736,7 +752,7 @@ function render(s){
   $('btnStart').disabled = s.running || s.starting || s.stopping || s.busy;
   $('btnStop').disabled  = !(s.running && s.owned) || s.stopping || s.busy;
   $('btnRestart').disabled = s.starting || s.stopping || s.busy || (s.running && !s.owned);
-  // 外部实例也可更新：updateDsh 走"仅安装到安装根，不重启"分支（extHint 有提示）
+  // 外部实例也可更新：updateDsh 走"仅更新到 profile 目录，不重启"分支（extHint 有提示）
   $('btnUpdate').disabled = s.busy || s.stopping;
 }
 function showMsg(t, kind){ var m = $('msg'); m.textContent = t; m.className = 'msg show ' + (kind||'ok'); }
@@ -788,7 +804,7 @@ $('btnUpdate').onclick = function(){
   var s = lastStatus || {};
   var tip = '';
   if (s.running && s.owned) tip = '将先停止 dsh 服务，安装完成后自动重启。';
-  else if (s.running && !s.owned) tip = '当前为外部 dsh 实例：仅安装到安装根，运行中的实例需自行重启后生效。';
+  else if (s.running && !s.owned) tip = '当前为外部 dsh 实例：仅更新到 profile 目录，运行中的实例需自行重启后生效。';
   else tip = 'dsh 未运行，将安装最新版本。';
   var v = '';
   if (s.localVersion) v += '当前 ' + s.localVersion + '，';
@@ -1038,7 +1054,7 @@ async function main() {
   writeShellPid();
   await detectStatus();
   broadcast('status', statusJson());
-  pushLog('info', 'dsh-shell v' + SHELL_VERSION + ' 就绪 | 安装根: ' + cfg.installRoot + ' | 窗口模式: ' + cfg.windowMode + (usedFallback ? ' | 面板端口: ' + chosenPort + '（默认端口被占，已自动切换）' : ''));
+  pushLog('info', 'dsh-shell v' + SHELL_VERSION + ' 就绪 | 安装位置: ' + DSH_PROFILE_DIR + ' | 窗口模式: ' + cfg.windowMode + (usedFallback ? ' | 面板端口: ' + chosenPort + '（默认端口被占，已自动切换）' : ''));
   // WebView2 模式：回收旧的 Edge 显示器 profile（约 300MB）；被占用时静默跳过，下次再试
   if (cfg.windowMode === 'webview2' && existsSync(DISPLAY_EXE)) {
     const oldProfile = path.join(dataDir, 'edge-profile-dsh');
